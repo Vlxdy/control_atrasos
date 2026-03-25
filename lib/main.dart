@@ -1,4 +1,8 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   runApp(const MyApp());
@@ -7,116 +11,300 @@ void main() {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'Control de atrasos',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
+        useMaterial3: true,
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
+      supportedLocales: const [
+        Locale('es'),
+        Locale('en'),
+      ],
+      home: const AttendancePage(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class AttendancePage extends StatefulWidget {
+  const AttendancePage({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<AttendancePage> createState() => _AttendancePageState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _AttendancePageState extends State<AttendancePage> {
+  static const _storageKey = 'attendance_records_v1';
+  static const _entryHour = 9;
 
-  void _incrementCounter() {
+  static const List<String> _weekDays = [
+    'Lun',
+    'Mar',
+    'Mié',
+    'Jue',
+    'Vie',
+    'Sáb',
+    'Dom',
+  ];
+  static const List<String> _months = [
+    'enero',
+    'febrero',
+    'marzo',
+    'abril',
+    'mayo',
+    'junio',
+    'julio',
+    'agosto',
+    'septiembre',
+    'octubre',
+    'noviembre',
+    'diciembre',
+  ];
+
+  Map<String, int> _records = {};
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadRecords();
+  }
+
+  Future<void> _loadRecords() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_storageKey);
+    if (raw == null) {
+      setState(() => _loading = false);
+      return;
+    }
+
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map<String, dynamic>) {
+      setState(() => _loading = false);
+      return;
+    }
+
+    _records = decoded.map(
+      (key, value) => MapEntry(key, (value as num).toInt()),
+    );
+
+    setState(() => _loading = false);
+  }
+
+  Future<void> _saveRecords() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_storageKey, jsonEncode(_records));
+  }
+
+  Future<void> _registerTodayEntry() async {
+    final today = DateTime.now();
+    await _registerEntryForDate(today);
+  }
+
+  Future<void> _registerEntryOtherDay() async {
+    final today = DateTime.now();
+    final pickedDay = await showDatePicker(
+      context: context,
+      initialDate: today,
+      firstDate: DateTime(today.year - 1),
+      lastDate: DateTime(today.year + 1),
+      locale: const Locale('es'),
+    );
+
+    if (pickedDay == null || !mounted) {
+      return;
+    }
+
+    await _registerEntryForDate(pickedDay);
+  }
+
+  Future<void> _registerEntryForDate(DateTime selectedDay) async {
+    if (selectedDay.weekday == DateTime.saturday ||
+        selectedDay.weekday == DateTime.sunday) {
+      _showMessage('Solo se permiten registros de lunes a viernes.');
+      return;
+    }
+
+    final dayKey = _dateKey(selectedDay);
+    if (_records.containsKey(dayKey)) {
+      _showMessage('Ya existe una entrada registrada para este día.');
+      return;
+    }
+
+    final now = TimeOfDay.now();
+    final pickedTime = await showTimePicker(
+      context: context,
+      initialTime: now,
+      helpText: 'Selecciona la hora de marcado',
+    );
+
+    if (pickedTime == null) {
+      return;
+    }
+
+    final pickedMinutes = pickedTime.hour * 60 + pickedTime.minute;
+    const entryMinutes = _entryHour * 60;
+    final lateMinutes = (pickedMinutes - entryMinutes).clamp(0, 24 * 60);
+
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _records[dayKey] = lateMinutes;
     });
+    await _saveRecords();
+
+    final message = lateMinutes == 0
+        ? 'Registro guardado sin atraso.'
+        : 'Registro guardado: ${_formatDuration(lateMinutes)} de atraso.';
+    _showMessage(message);
+  }
+
+  Future<void> _deleteEntry(String key) async {
+    setState(() {
+      _records.remove(key);
+    });
+    await _saveRecords();
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  String _dateKey(DateTime date) {
+    final normalized = DateTime(date.year, date.month, date.day);
+    return normalized.toIso8601String().split('T').first;
+  }
+
+  DateTime _parseDateKey(String key) => DateTime.parse(key);
+
+  String _formatMonthYear(DateTime date) {
+    return '${_months[date.month - 1]} ${date.year}';
+  }
+
+  String _formatDay(DateTime date) {
+    final weekDay = _weekDays[date.weekday - 1];
+    final day = date.day.toString().padLeft(2, '0');
+    final month = date.month.toString().padLeft(2, '0');
+    return '$weekDay $day/$month/${date.year}';
+  }
+
+  String _formatDuration(int minutes) {
+    final hours = minutes ~/ 60;
+    final mins = minutes % 60;
+    return '${hours}h ${mins.toString().padLeft(2, '0')}m';
+  }
+
+  int _monthlyTotalLateMinutes(DateTime month) {
+    return _records.entries
+        .where((entry) {
+          final date = _parseDateKey(entry.key);
+          return date.year == month.year && date.month == month.month;
+        })
+        .map((entry) => entry.value)
+        .fold(0, (sum, item) => sum + item);
+  }
+
+  List<MapEntry<String, int>> _sortedCurrentMonthEntries(DateTime month) {
+    final entries = _records.entries.where((entry) {
+      final date = _parseDateKey(entry.key);
+      return date.year == month.year && date.month == month.month;
+    }).toList();
+
+    entries.sort((a, b) => b.key.compareTo(a.key));
+    return entries;
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
+    final now = DateTime.now();
+    final monthEntries = _sortedCurrentMonthEntries(now);
+    final monthlyLateMinutes = _monthlyTotalLateMinutes(now);
+
     return Scaffold(
       appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
+        title: const Text('Control de Atrasos'),
       ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
-          children: [
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _loading ? null : _registerTodayEntry,
+        icon: const Icon(Icons.add_alarm),
+        label: const Text('Registrar entrada (hoy)'),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Card(
+                    child: ListTile(
+                      title: Text(
+                        'Atraso total (${_formatMonthYear(now)})',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      subtitle: const Text('Hora de ingreso esperada: 09:00'),
+                      trailing: Text(
+                        _formatDuration(monthlyLateMinutes),
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Registros del mes',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 8),
+                  FilledButton.tonalIcon(
+                    onPressed: _loading ? null : _registerEntryOtherDay,
+                    icon: const Icon(Icons.edit_calendar),
+                    label: const Text('Registrar otro día (si olvidé marcar)'),
+                  ),
+                  const SizedBox(height: 8),
+                  Expanded(
+                    child: monthEntries.isEmpty
+                        ? const Center(
+                            child: Text(
+                              'No hay registros para este mes.',
+                              textAlign: TextAlign.center,
+                            ),
+                          )
+                        : ListView.builder(
+                            itemCount: monthEntries.length,
+                            itemBuilder: (context, index) {
+                              final entry = monthEntries[index];
+                              final date = _parseDateKey(entry.key);
+
+                              return Card(
+                                child: ListTile(
+                                  leading: const Icon(Icons.calendar_today),
+                                  title: Text(_formatDay(date)),
+                                  subtitle: Text(
+                                    entry.value == 0
+                                        ? 'Sin atraso'
+                                        : 'Atraso: ${_formatDuration(entry.value)}',
+                                  ),
+                                  trailing: IconButton(
+                                    icon: const Icon(Icons.delete_outline),
+                                    tooltip: 'Eliminar registro',
+                                    onPressed: () => _deleteEntry(entry.key),
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
             ),
-          ],
-        ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ),
     );
   }
 }
